@@ -1,5 +1,13 @@
+/* RTCSocket.js
+ * By Gavin Wood <i@gavwood.com>, 2013.
+ * Some code inspired and/or adapted from various places on the internet including:
+ *   https://github.com/firebase/gupshup/
+ * This code is licenced under the GNU GPL, version 2.
+ */
+
 function RTCSocket()
 {
+	$(window).unload(function(){this.close()});
 }
 
 RTCSocket.prototype.getBar = function()
@@ -12,6 +20,7 @@ RTCSocket.prototype.m_config = {"iceServers": [{"url": "stun:stun.l.google.com:1
 RTCSocket.prototype.m_constraints = {"optional": [{"DtlsSrtpKeyAgreement": true}, {RtpDataChannels: true}]};
 RTCSocket.prototype.m_connection = null;
 RTCSocket.prototype.m_data = null;
+RTCSocket.prototype.m_peerId = null;
 RTCSocket.prototype.m_id = null;
 
 RTCSocket.prototype.accept = function (_from, _offer, _onMessage, _onOpen, _onClose)
@@ -23,24 +32,26 @@ RTCSocket.prototype.accept = function (_from, _offer, _onMessage, _onOpen, _onCl
 
     this.m_connection.onicecandidate = function(event)
 	{
+		if (this_.m_id == null)
+		{
+			console.log("--- ICE candidate given after connection established. Ignoring.");
+			return;
+		}
 		if (event.candidate)
 		{
 			var iceSend = {
-				to: _from,
 				label: event.candidate.sdpMLineIndex,
 				id: event.candidate.sdpMid,
 				candidate: event.candidate.candidate
 			};
-			this_.m_mainRef.child(iceSend.to).child("ice").set(iceSend);
+			this_.m_mainRef.child(_from).child("ice").child(this_.m_id).set(iceSend);
 		}
-		else
-			console.log("--- Got all ICE candidates.");
     };
 
 	this.m_connection.ondatachannel = function (e)
 	{
 		this_.m_data = e.channel;
-		this_.m_data.onopen = function(e) { this_.m_id = null; this_.m_mainRef.child(_from).set(null); if (_onOpen) _onOpen(e); };
+		this_.m_data.onopen = function(e) { this_.opening(); if (_onOpen) _onOpen(e); };
 		this_.m_data.onmessage = _onMessage;
 		this_.m_data.onclose = _onClose;
 	};
@@ -52,64 +63,71 @@ RTCSocket.prototype.accept = function (_from, _offer, _onMessage, _onOpen, _onCl
 		{
 			this_.m_connection.setLocalDescription(answer, function()
 			{
-				var toSend = {
-					type: "answer",
-					to: _from,
-					from: this_.m_id,
-					answer: JSON.stringify(answer)
-				};
-				var toUser = this_.m_mainRef.child(toSend.to);
-				var toUserSDP = toUser.child("sdp");
+				var toSend = { type: "answer", answer: JSON.stringify(answer) };
+				var toUserSDP = this_.m_mainRef.child(_from).child("sdp").child(this_.m_id);
 				toUserSDP.set(toSend);
 			}, this_.error);
 		}, this_.error);
 	}, this.error);
 };
 
+RTCSocket.prototype.incomingSDP = function (_snapshot)
+{
+	var from = _snapshot.name();
+	var data = _snapshot.val();
+	this.m_mainRef.child(this.m_id).child('sdp').child(from).set(null);
+
+	if (data.type == "offer" && this.m_peerId == null)
+	{
+		this.m_onIncoming(from, data.offer);
+		this.m_peerId = from;
+	}
+	else if (_snapshot.name() == this.m_peerId && data.type == "answer")
+	{
+		var desc = new RTCSessionDescription(JSON.parse(data.answer));
+		this.m_connection.setRemoteDescription(desc, function(){}, this.error);
+	}
+	else
+		return;
+
+	this.m_mainRef.child(this.m_id).child('sdp').off("child_added");
+	this.m_mainRef.child(this.m_id).child('ice').on("child_added", this.incomingICE.bind(this));
+	this.m_mainRef.child(this.m_peerId).on("child_removed", this.outgoingControl.bind(this));
+};
+
+RTCSocket.prototype.outgoingControl = function (_snapshot)
+{
+	if (_snapshot.name() == "active")
+		this.close();
+}
+
+RTCSocket.prototype.incomingICE = function (_snapshot)
+{
+	if (_snapshot.name() == this.m_peerId)
+	{
+		var data = _snapshot.val();
+		var candidate = new RTCIceCandidate({
+			sdpMLineIndex: data.label, candidate: data.candidate
+		});
+		this.m_connection.addIceCandidate(candidate);
+	}
+	this.m_mainRef.child(this.m_id).child('ice').child(_snapshot.name()).set(null);
+};
+
 RTCSocket.prototype.advertise = function (_onIncoming)
 {
-	if (_onIncoming == null)
-		_onIncoming = this.accept;
+	var userNode = this.m_mainRef.child(this.m_id);
+	userNode.onDisconnect().remove();
+	$(window).unload(function() { userNode.set(null); });
 
-	var userRef = this.m_mainRef.child(this.m_id);
-	var userSDP = userRef.child("sdp");
-	var userICE = userRef.child("ice");
-
-	userSDP.onDisconnect().remove();
-	$(window).unload(function() { userSDP.set(null); });
-
-	var this_ = this;
-	this.m_mainRef.on("child_changed", function(snapshot)
-	{
-		var data = snapshot.val();
-		if (data.sdp && data.sdp.to == this_.m_id)
-		{
-			if (data.sdp.type == "offer")
-			{
-				_onIncoming(data.sdp.from, data.sdp.offer);
-				userSDP.set(null);
-			}
-			if (data.sdp.type == "answer")
-			{
-				var desc = new RTCSessionDescription(JSON.parse(data.sdp.answer));
-				this_.m_connection.setRemoteDescription(desc, function(){}, this_.error);
-				userSDP.set(null);
-			}
-		}
-		if (data.ice && data.ice.to == this_.m_id)
-		{
-			var candidate = new RTCIceCandidate({
-				sdpMLineIndex: data.ice.label, candidate: data.ice.candidate
-			});
-			this_.m_connection.addIceCandidate(candidate);
-			userICE.set(null);
-		}
-	});
+	this.m_onIncoming = _onIncoming ? _onIncoming : this.accept;
+	this.m_mainRef.child(this.m_id).child('sdp').on("child_added", this.incomingSDP.bind(this));
+	this.m_mainRef.child(this.m_id).child('active').set(1);
 
 	return this.m_id;
 };
 
-RTCSocket.prototype.newEndpointID = function ()
+RTCSocket.prototype.newId = function ()
 {
 	return '' + Math.floor(Math.random() * 0xffffffff);
 };
@@ -118,7 +136,7 @@ RTCSocket.prototype.listen = function (_onIncoming)
 {
 	if (!this.m_id)
 	{
-		this.m_id = this.newEndpointID();
+		this.m_id = this.newId();
 		console.log("--- Listen on " + this.m_id);
 		return this.advertise(_onIncoming);
 	}
@@ -127,16 +145,19 @@ RTCSocket.prototype.listen = function (_onIncoming)
 	return null;
 };
 
-RTCSocket.prototype.unlisten = function ()
+RTCSocket.prototype.cancel = function ()
 {
 	if (this.m_id)
 	{
 		console.log("--- Unlisten");
-		this.m_mainRef.child(this.m_id).set(null);
-		this.m_id = null;
+		this.close();
 	}
 	else
 		console.log("*** Can't unlisten on a dead endpoint.");
+};
+
+RTCSocket.prototype.opening = function()
+{
 };
 
 RTCSocket.prototype.connect = function (_dest, _onMessage, _onOpen, _onClose)
@@ -144,53 +165,51 @@ RTCSocket.prototype.connect = function (_dest, _onMessage, _onOpen, _onClose)
 	if (this.m_id)
 	{
 		console.log("*** Can't connect on a busy endpoint.");
-		return;
+		return false;
 	}
 
 	console.log("--- Connect to " + _dest);
 
 	var this_ = this;
 
-	this.m_id = _dest + 1;
+	this.m_id = this.newId();
 	this.advertise();
 
+	this.m_peerId = _dest;
 	this.m_connection = new RTCPeerConnection(this.m_config, this.m_constraints);
 	this.m_data = this.m_connection.createDataChannel("sendDataChannel", {reliable: false});
-	this.m_data.onopen = function(e) { this_.m_id = null; this_.m_mainRef.child(_dest).set(null); if (_onOpen) _onOpen(e); };
+	this.m_data.onopen = function(e) { this_.opening(); if (_onOpen) _onOpen(e); };
 	this.m_data.onmessage = _onMessage;
 	this.m_data.onclose = _onClose;
 
     this.m_connection.onicecandidate = function(event)
 	{
+		if (this_.m_id == null)
+		{
+			console.log("--- ICE candidate given after connection established. Ignoring.");
+			return;
+		}
 		if (event.candidate)
 		{
 			var iceSend = {
-	        	to: _dest,
     	    	label: event.candidate.sdpMLineIndex,
     	    	id: event.candidate.sdpMid,
     	    	candidate: event.candidate.candidate
         	};
-			this_.m_mainRef.child(iceSend.to).child("ice").set(iceSend);
+			this_.m_mainRef.child(_dest).child("ice").child(this_.m_id).set(iceSend);
 		}
-		else
-			console.log("--- Got all ICE candidates.");
     };
 
     this.m_connection.createOffer(function(offer)
 	{
 		this_.m_connection.setLocalDescription(offer, function()
 		{
-			var toSend = {
-				type: "offer",
-				to: _dest,
-				from: this_.m_id,
-				offer: JSON.stringify(offer)
-			};
-			var toUser = this_.m_mainRef.child(toSend.to);
-			var toUserSDP = toUser.child("sdp");
-			toUserSDP.set(toSend);
+			var toSend = { type: "offer", offer: JSON.stringify(offer) };
+			this_.m_mainRef.child(_dest).child("sdp").child(this_.m_id).set(toSend);
 		}, this_.error);
     }, this.error);
+
+	return true;
 };
 
 RTCSocket.prototype.isOpen = function ()
@@ -208,12 +227,23 @@ RTCSocket.prototype.send = function(x)
 
 RTCSocket.prototype.close = function ()
 {
+    if (this.m_peerId)
+    	this.m_mainRef.child(this.m_peerId).off("child_removed");
 	if (this.m_connection)
-	{
+	{	
+		// Clean up peer's connection for it only if we're connected
+		if (this.isOpen() && this.m_peerId)
+			this.m_mainRef.child(this.m_peerId).set(null);
+
+		this.m_data.close();
+		this.m_connection.close();
 		this.m_connection = null;
 		this.m_data = null;
-		this.m_id = null;
 	}
+	if (this.m_id)
+		this.m_mainRef.child(this.m_id).set(null);
+	this.m_id = null;
+	this.m_peerId = null;
 };
 
 RTCSocket.prototype.error = function (e)
@@ -224,3 +254,4 @@ RTCSocket.prototype.error = function (e)
 		console.log("*** Oh no! " + e);
 	this.close();
 };
+

@@ -8,41 +8,21 @@
 		<script src="js/p2p.js" type="text/javascript"></script>
 		<script src="js/trader.js" type="text/javascript"></script>
 
-		<link href="./common.css" rel="stylesheet" type="text/css" />
+		<link href="css/common.css" rel="stylesheet" type="text/css" />
 
 		<title>Trader</title>
 	</head>
 	<body>
-		<h2>Address</h2><input readonly id="address"><button id="listen">Listen</button>
-		<h2>Connect</h2><input id="connect"><button id="connect">Connect</button>
-		<h2>Comm</h2>
-		<input id="send">
-		<button id="send">Send</button>
-		<div id="recv"></div>
-		<script>
-			var s = new RTCSocket();
-			function recv(msg)
-			{
-				$('div#recv').html($('div#recv').html() + msg.data + '<br/>');
-			}
-			$(document).ready(function ()
-			{
-				$('button#send').click(function()
-				{
-					s.send($('input#send').val());
-					$('input#send').val('');
-				});
-				$('button#listen').click(function()
-				{
-					var id = s.listen(function(f, o){ s.accept(f, o, recv, function() { $('input#address').val(''); }); } );
-					$('#address').val(id);
-				});
-	
-				$('button#connect').click(function()
-				{
-					s.connect($('input#connect').val(), recv, function() { $('input#connect').val(''); });
-				});
-			});
-		</script>
+		<table width="100%"><tr><td>
+			<h3>Ask</h3>
+			&eur;<input id="askeur"> @ <input id="askbtc"><button id="order">Ask</button>
+			<div id="asks">
+			</div>
+		</td><td>
+			<h3>Bid</h3>
+			&eur;<input id="bideur"> @ <input id="bidbtc"><button id="order">Bid</button>
+			<div id="bids">
+			</div>
+		</td></tr></table>
 	</body>
 </html>
